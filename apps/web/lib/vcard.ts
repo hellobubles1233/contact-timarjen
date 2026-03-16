@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto"
 import type { ContactConfig, VCardAddress, VCardConfig, VCardTypedValue } from "@/lib/contact-config"
 
-type VCardLine = { name: string; params?: Record<string, string | string[] | number>; value: string }
+type VCardLine = {
+  group?: string
+  name: string
+  params?: Record<string, string | string[] | number>
+  value: string
+  escaped?: boolean
+}
 
 function escapeVCardValue(value: string) {
   return value
@@ -31,6 +37,57 @@ function formatParams(params: VCardLine["params"]) {
   return parts.length ? `;${parts.join(";")}` : ""
 }
 
+function hasNonAscii(value: string) {
+  for (const char of value) {
+    if (char.charCodeAt(0) > 0x7f) return true
+  }
+  return false
+}
+
+function textParams(value: string, params?: VCardLine["params"]) {
+  const next = params ? { ...params } : {}
+  if (hasNonAscii(value) && !next.CHARSET) {
+    next.CHARSET = "UTF-8"
+  }
+  return Object.keys(next).length ? next : undefined
+}
+
+function joinStructured(parts: Array<string | undefined>) {
+  return parts.map((part) => escapeVCardValue(part ?? "")).join(";")
+}
+
+function joinList(parts: Array<string | undefined>) {
+  return parts.map((part) => escapeVCardValue(part ?? "")).join(",")
+}
+
+function textLine(name: string, value: string, params?: VCardLine["params"], group?: string): VCardLine {
+  return { name, group, params: textParams(value, params), value, escaped: false }
+}
+
+function uriLine(name: string, value: string, params?: VCardLine["params"], group?: string): VCardLine {
+  return { name, group, params, value, escaped: true }
+}
+
+function structuredLine(
+  name: string,
+  parts: Array<string | undefined>,
+  params?: VCardLine["params"],
+  group?: string
+): VCardLine {
+  const raw = parts.join("")
+  return { name, group, params: textParams(raw, params), value: joinStructured(parts), escaped: true }
+}
+
+function listLine(
+  name: string,
+  parts: Array<string | undefined>,
+  params?: VCardLine["params"],
+  group?: string
+): VCardLine {
+  const raw = parts.join("")
+  return { name, group, params: textParams(raw, params), value: joinList(parts), escaped: true }
+}
+
 function foldLine(line: string) {
   const maxBytes = 75
   if (Buffer.byteLength(line, "utf8") <= maxBytes) return line
@@ -49,8 +106,9 @@ function foldLine(line: string) {
   return out
 }
 
-function formatLine({ name, params, value }: VCardLine) {
-  const line = `${name.toUpperCase()}${formatParams(params)}:${escapeVCardValue(value)}`
+function formatLine({ group, name, params, value, escaped }: VCardLine) {
+  const fullName = group ? `${group}.${name}` : name
+  const line = `${fullName}${formatParams(params)}:${escaped ? value : escapeVCardValue(value)}`
   return foldLine(line)
 }
 
@@ -91,8 +149,7 @@ function deriveStructuredName(fn: string): NonNullable<VCardConfig["n"]> {
 }
 
 function adrValue(address: VCardAddress) {
-  // PO box; extended address; street; locality; region; postal code; country name
-  const parts = [
+  return [
     address.pobox ?? "",
     address.extended ?? "",
     address.street ?? "",
@@ -101,30 +158,99 @@ function adrValue(address: VCardAddress) {
     address.postalCode ?? "",
     address.country ?? "",
   ]
-  return parts.join(";")
 }
 
-function typedValueLines(
-  prop: string,
-  values: Array<VCardTypedValue> | undefined
-): VCardLine[] {
-  const out: VCardLine[] = []
-  if (!values?.length) return out
+function normalizeType(token: string) {
+  const normalized = token.trim()
+  if (!normalized) return undefined
+  return normalized.replace(/\s+/g, "-").toUpperCase()
+}
 
-  for (const entry of values) {
-    const v = entry?.value?.trim()
-    if (!v) continue
+function normalizeTypes(prop: string, entry: VCardTypedValue) {
+  const types = (entry.type ?? [])
+    .map(normalizeType)
+    .filter((value): value is string => Boolean(value))
 
-    const params: Record<string, string | string[] | number> = {}
-    const types = entry.type?.filter(Boolean)
-    if (types?.length) params.TYPE = types
-    if (typeof entry.pref === "number") params.PREF = entry.pref
-    if (entry.label) params.LABEL = entry.label
-
-    out.push({ name: prop, params: Object.keys(params).length ? params : undefined, value: v })
+  if (prop === "EMAIL" && !types.includes("INTERNET")) {
+    types.unshift("INTERNET")
   }
 
-  return out
+  if (entry.pref && !types.includes("PREF")) {
+    types.unshift("PREF")
+  }
+
+  return [...new Set(types)]
+}
+
+function dataUrlParts(uri: string) {
+  const match = /^data:([^;,]+)?(?:;charset=[^;,]+)?;base64,([a-z0-9+/=\s]+)$/i.exec(uri)
+  if (!match) return undefined
+  return {
+    mediaType: match[1] || "application/octet-stream",
+    base64: match[2]!.replace(/\s+/g, ""),
+  }
+}
+
+function vCardMediaType(mediaType: string | undefined) {
+  if (!mediaType) return undefined
+  if (!mediaType.includes("/")) return mediaType.toUpperCase()
+  const [, subtype] = mediaType.split("/", 2)
+  if (!subtype) return mediaType.toUpperCase()
+  return subtype.replace(/\+xml$/i, "").replace(/^jpg$/i, "jpeg").toUpperCase()
+}
+
+function imageLine(
+  name: "PHOTO" | "LOGO",
+  asset: { uri: string; mediaType?: string } | undefined
+): VCardLine | undefined {
+  const uri = asset?.uri?.trim()
+  if (!uri) return undefined
+
+  const inline = dataUrlParts(uri)
+  if (inline) {
+    const type = vCardMediaType(asset?.mediaType ?? inline.mediaType)
+    return {
+      name,
+      params: type ? { ENCODING: "b", TYPE: type } : { ENCODING: "b" },
+      value: inline.base64,
+      escaped: true,
+    }
+  }
+
+  const type = vCardMediaType(asset?.mediaType)
+  return uriLine(name, uri, type ? { VALUE: "uri", TYPE: type } : { VALUE: "uri" })
+}
+
+function extendedLine(name: string, value: string, params?: VCardLine["params"]) {
+  return textLine(name, value, params)
+}
+
+function formatRev(now: Date) {
+  return now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")
+}
+
+function pushTypedValueLines(
+  lines: VCardLine[],
+  prop: "EMAIL" | "TEL" | "URL" | "X-IMPP",
+  values: Array<VCardTypedValue> | undefined,
+  counter: { value: number }
+) {
+  if (!values?.length) return
+
+  for (const entry of values) {
+    const value = entry.value?.trim()
+    if (!value) continue
+
+    const types = normalizeTypes(prop, entry)
+    const params = types.length ? { TYPE: types } : undefined
+    const group = entry.label?.trim() ? `item${counter.value++}` : undefined
+    const lineFactory = prop === "URL" ? uriLine : textLine
+    lines.push(lineFactory(prop, value, params, group))
+
+    if (group && entry.label?.trim()) {
+      lines.push(textLine("X-ABLabel", entry.label.trim(), undefined, group))
+    }
+  }
 }
 
 export function buildVCard({
@@ -139,7 +265,6 @@ export function buildVCard({
   const v = contact.vcard ?? {}
 
   const fn = (v.fn ?? contact.profile.displayName).trim() || "Contact"
-  const kind = v.kind ?? "individual"
   const source = v.source ?? baseUrl
   const uid = v.uid ?? stableUidFrom({ fn, source })
   const photo = v.photo?.uri ? v.photo : contact.profile.avatarUrl ? { uri: contact.profile.avatarUrl } : undefined
@@ -156,71 +281,62 @@ export function buildVCard({
 
   const itemEmails: VCardTypedValue[] = contact.items
     .filter((i) => i.type === "email")
-    .map((i) => ({ value: i.value ?? i.href?.replace(/^mailto:/, "") ?? "" }))
+    .map((i) => ({
+      value: i.value ?? i.href?.replace(/^mailto:/, "") ?? "",
+      type: ["internet"],
+      label: i.label && i.label !== "Email" ? i.label : undefined,
+    }))
     .filter((x) => x.value)
 
   const itemTels: VCardTypedValue[] = contact.items
     .filter((i) => i.type === "phone")
-    .map((i) => ({ value: i.value ?? i.href?.replace(/^tel:/, "") ?? "" }))
+    .map((i) => ({
+      value: i.value ?? i.href?.replace(/^tel:/, "") ?? "",
+      type: ["cell", "voice"],
+      label: i.label && i.label !== "Call" ? i.label : undefined,
+    }))
     .filter((x) => x.value)
 
   const itemUrls: VCardTypedValue[] = contact.items
     .filter((i) => i.type !== "email" && i.type !== "phone")
-    .map((i) => ({ value: i.href ?? i.value ?? "" }))
+    .map((i) => ({ value: i.href ?? i.value ?? "", label: i.label || undefined }))
     .filter((x) => x.value && /^https?:\/\//i.test(x.value))
 
   if (baseUrl && !itemUrls.some((u) => u.value === baseUrl)) {
-    itemUrls.unshift({ value: baseUrl, type: ["home"], pref: 1 })
+    itemUrls.unshift({ value: baseUrl, type: ["home"], pref: 1, label: "Contact page" })
   }
 
   const lines: VCardLine[] = [
-    { name: "BEGIN", value: "VCARD" },
-    { name: "VERSION", value: "4.0" },
-    { name: "KIND", value: kind },
-    { name: "FN", value: fn },
-    {
-      name: "N",
-      value: `${n.family ?? ""};${n.given ?? ""};${n.additional ?? ""};${n.prefix ?? ""};${
-        n.suffix ?? ""
-      }`,
-    },
+    { name: "BEGIN", value: "VCARD", escaped: true },
+    { name: "VERSION", value: "3.0", escaped: true },
   ]
 
+  if (v.prodId) {
+    lines.push(uriLine("PRODID", v.prodId))
+  }
+
+  lines.push(structuredLine("N", [n.family, n.given, n.additional, n.prefix, n.suffix]))
+  lines.push(textLine("FN", fn))
+
   const nicknames = v.nicknames?.map((x) => x.trim()).filter(Boolean) ?? []
-  if (nicknames.length) lines.push({ name: "NICKNAME", value: nicknames.join(",") })
+  if (nicknames.length) lines.push(listLine("NICKNAME", nicknames))
 
   const orgParts = v.org?.map((p) => p.trim()).filter(Boolean) ?? []
-  if (orgParts.length) lines.push({ name: "ORG", value: orgParts.join(";") })
-  if (v.title) lines.push({ name: "TITLE", value: v.title })
-  if (v.role) lines.push({ name: "ROLE", value: v.role })
+  if (orgParts.length) lines.push(structuredLine("ORG", orgParts))
+  if (v.title) lines.push(textLine("TITLE", v.title))
+  if (v.role) lines.push(textLine("ROLE", v.role))
 
-  if (photo?.uri) {
-    lines.push({
-      name: "PHOTO",
-      params: { VALUE: "uri", ...(photo.mediaType ? { MEDIATYPE: photo.mediaType } : {}) },
-      value: photo.uri,
-    })
-  }
-  if (v.logo?.uri) {
-    lines.push({
-      name: "LOGO",
-      params: { VALUE: "uri", ...(v.logo.mediaType ? { MEDIATYPE: v.logo.mediaType } : {}) },
-      value: v.logo.uri,
-    })
-  }
+  const photoLine = imageLine("PHOTO", photo)
+  if (photoLine) lines.push(photoLine)
 
-  for (const l of typedValueLines("EMAIL", v.emails?.length ? v.emails : itemEmails)) {
-    lines.push(l)
-  }
-  for (const l of typedValueLines("TEL", v.tels?.length ? v.tels : itemTels)) {
-    lines.push(l)
-  }
-  for (const l of typedValueLines("URL", v.urls?.length ? v.urls : itemUrls)) {
-    lines.push(l)
-  }
-  for (const l of typedValueLines("IMPP", v.impps)) {
-    lines.push(l)
-  }
+  const logoLine = imageLine("LOGO", v.logo)
+  if (logoLine) lines.push(logoLine)
+
+  const groupCounter = { value: 1 }
+  pushTypedValueLines(lines, "EMAIL", v.emails?.length ? v.emails : itemEmails, groupCounter)
+  pushTypedValueLines(lines, "TEL", v.tels?.length ? v.tels : itemTels, groupCounter)
+  pushTypedValueLines(lines, "URL", v.urls?.length ? v.urls : itemUrls, groupCounter)
+  pushTypedValueLines(lines, "X-IMPP", v.impps, groupCounter)
 
   if (v.addresses?.length) {
     for (const address of v.addresses) {
@@ -235,61 +351,71 @@ export function buildVCard({
       )
       if (!hasAddressParts) continue
 
-      const params: Record<string, string | string[] | number> = {}
-      if (address.type?.length) params.TYPE = address.type
-      if (typeof address.pref === "number") params.PREF = address.pref
-      if (address.label) params.LABEL = address.label
-      lines.push({ name: "ADR", params, value: adrValue(address) })
+      const params: Record<string, string | string[]> = {}
+      const types = normalizeTypes("ADR", {
+        value: address.street ?? address.locality ?? address.country ?? "",
+        type: address.type,
+        pref: address.pref,
+      })
+      if (types.length) params.TYPE = types
+      const group = address.label?.trim() ? `item${groupCounter.value++}` : undefined
+      lines.push(structuredLine("ADR", adrValue(address), Object.keys(params).length ? params : undefined, group))
+      if (group && address.label?.trim()) {
+        lines.push(textLine("X-ABLabel", address.label.trim(), undefined, group))
+      }
     }
   }
 
-  if (v.bday) lines.push({ name: "BDAY", value: v.bday })
-  if (v.anniversary) lines.push({ name: "ANNIVERSARY", value: v.anniversary })
-  if (v.tz) lines.push({ name: "TZ", value: v.tz })
+  if (v.bday) lines.push(uriLine("BDAY", v.bday))
+  if (v.anniversary) lines.push(extendedLine("X-ANNIVERSARY", v.anniversary))
+  if (v.tz) lines.push(extendedLine("X-TIMEZONE", v.tz))
 
   if (v.languages?.length) {
     for (const lang of v.languages.map((l) => l.trim()).filter(Boolean)) {
-      lines.push({ name: "LANG", value: lang })
+      lines.push(extendedLine("X-LANGUAGE", lang))
     }
   }
 
   if (v.geo) {
-    lines.push({ name: "GEO", value: `geo:${v.geo.lat},${v.geo.lon}` })
+    lines.push(extendedLine("X-GEO", `${v.geo.lat},${v.geo.lon}`))
   }
 
   const categories = v.categories?.map((c) => c.trim()).filter(Boolean) ?? []
-  if (categories.length) lines.push({ name: "CATEGORIES", value: categories.join(",") })
+  if (categories.length) lines.push(listLine("CATEGORIES", categories))
 
   if (v.note ?? contact.profile.bio) {
-    lines.push({ name: "NOTE", value: v.note ?? contact.profile.bio ?? "" })
+    lines.push(textLine("NOTE", v.note ?? contact.profile.bio ?? ""))
   }
 
-  if (v.fbUrl) lines.push({ name: "FBURL", value: v.fbUrl })
-  if (v.calAdrUri) lines.push({ name: "CALADRURI", value: v.calAdrUri })
-  if (v.calUri) lines.push({ name: "CALURI", value: v.calUri })
+  if (v.fbUrl) lines.push(extendedLine("X-FBURL", v.fbUrl))
+  if (v.calAdrUri) lines.push(extendedLine("X-CALADRURI", v.calAdrUri))
+  if (v.calUri) lines.push(extendedLine("X-CALURI", v.calUri))
   if (v.keys?.length) {
     for (const key of v.keys) {
       if (key?.uri) {
-        lines.push({
-          name: "KEY",
-          params: { VALUE: "uri", ...(key.mediaType ? { MEDIATYPE: key.mediaType } : {}) },
-          value: key.uri,
-        })
+        lines.push(
+          extendedLine(
+            "X-KEY-URI",
+            key.uri,
+            key.mediaType ? { TYPE: vCardMediaType(key.mediaType) ?? key.mediaType } : undefined
+          )
+        )
       } else if (key?.text) {
-        lines.push({
-          name: "KEY",
-          params: key.mediaType ? { MEDIATYPE: key.mediaType } : undefined,
-          value: key.text,
-        })
+        lines.push(
+          textLine(
+            "X-KEY-TEXT",
+            key.text,
+            key.mediaType ? { TYPE: vCardMediaType(key.mediaType) ?? key.mediaType } : undefined
+          )
+        )
       }
     }
   }
-  if (source) lines.push({ name: "SOURCE", value: source })
-  if (v.prodId) lines.push({ name: "PRODID", value: v.prodId })
+  if (source) lines.push(uriLine("SOURCE", source))
 
-  lines.push({ name: "UID", value: uid })
-  lines.push({ name: "REV", value: now.toISOString() })
-  lines.push({ name: "END", value: "VCARD" })
+  lines.push(uriLine("UID", uid))
+  lines.push(uriLine("REV", formatRev(now)))
+  lines.push({ name: "END", value: "VCARD", escaped: true })
 
   return lines.map(formatLine).join("\r\n") + "\r\n"
 }

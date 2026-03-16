@@ -29,7 +29,25 @@ export function ShareSheet({
 
   const canShare = typeof navigator !== "undefined" && typeof navigator.share === "function"
   const canCopy = typeof navigator !== "undefined" && !!navigator.clipboard?.writeText
-  const canNfc = typeof window !== "undefined" && "NDEFWriter" in window
+  const nfcUnavailableReason = React.useMemo(() => {
+    if (typeof window === "undefined") return "Checking NFC support."
+    if (!window.isSecureContext) return "NFC needs HTTPS."
+
+    const userAgent = navigator.userAgent.toLowerCase()
+    const isAndroid = userAgent.includes("android")
+    const isChromeFamily =
+      userAgent.includes("chrome") || userAgent.includes("chromium") || userAgent.includes("crios")
+
+    if (!("NDEFReader" in window)) {
+      if (isAndroid && isChromeFamily) {
+        return "This Chrome build does not expose Web NFC. Update Chrome and open the page directly in Chrome, not an in-app browser."
+      }
+      return "Web NFC is only available in supported Android Chromium browsers."
+    }
+
+    return ""
+  }, [])
+  const canNfc = !nfcUnavailableReason
 
   async function onCopy() {
     if (!canCopy) {
@@ -67,37 +85,68 @@ export function ShareSheet({
 
   async function onWriteNfc() {
     if (!canNfc) {
-      setStatus("Web NFC not supported (Android Chrome only).")
+      setStatus(nfcUnavailableReason)
       return
     }
     setBusy("nfc")
     setStatus("")
     try {
-      // @ts-expect-error Web NFC is not in TS lib yet.
-      const writer = new window.NDEFWriter()
+      // @ts-expect-error Web NFC is not in the default TS DOM lib here.
+      const ndef = new window.NDEFReader()
       if (mode === "site") {
-        await writer.write({ records: [{ recordType: "url", data: siteUrl }] })
-        setStatus("Ready — tap an NFC tag to write the link.")
+        await ndef.write({ records: [{ recordType: "url", data: siteUrl }] })
+        setStatus("Wrote the page link to the NFC tag.")
       } else {
-        // Prefer writing the vCard itself if we can fetch it.
+        let wroteInlineVcard = false
+
         try {
           const res = await fetch(vcardUrl, { cache: "no-store" })
           if (res.ok) {
             const vcard = await res.text()
-            await writer.write({
-              records: [{ recordType: "mime", mediaType: "text/vcard", data: vcard }],
-            })
-            setStatus("Ready — tap an NFC tag to write the vCard.")
-            return
+            try {
+              await ndef.write({
+                records: [
+                  {
+                    recordType: "mime",
+                    mediaType: "text/x-vcard",
+                    data: new TextEncoder().encode(vcard),
+                  },
+                ],
+              })
+              wroteInlineVcard = true
+              setStatus("Wrote the full vCard to the NFC tag.")
+              return
+            } catch {
+              wroteInlineVcard = false
+            }
           }
         } catch {
           // fall through
         }
-        await writer.write({ records: [{ recordType: "url", data: vcardUrl }] })
-        setStatus("Ready — tap an NFC tag to write the vCard link.")
+
+        await ndef.write({ records: [{ recordType: "url", data: vcardUrl }] })
+        setStatus(
+          wroteInlineVcard
+            ? "Wrote the vCard to the NFC tag."
+            : "This tag/browser did not accept a full contact card, so the vCard download link was written instead."
+        )
       }
-    } catch {
-      setStatus("NFC write failed or was cancelled.")
+    } catch (error) {
+      if (error instanceof DOMException) {
+        if (error.name === "NotAllowedError") {
+          setStatus("Allow NFC access in Chrome and try again.")
+        } else if (error.name === "NotSupportedError") {
+          setStatus("NFC is not available. Make sure NFC is turned on and the phone is unlocked.")
+        } else if (error.name === "NotReadableError") {
+          setStatus("Could not reach the NFC tag. Hold the phone against an NDEF-formatted tag and try again.")
+        } else if (error.name === "AbortError") {
+          setStatus("NFC write was cancelled.")
+        } else {
+          setStatus(`NFC write failed: ${error.name}.`)
+        }
+      } else {
+        setStatus("NFC write failed.")
+      }
     } finally {
       setBusy(null)
     }
@@ -150,7 +199,7 @@ export function ShareSheet({
               onClick={onWriteNfc}
               disabled={busy !== null}
               className={cn(!canNfc && "opacity-60")}
-              title={canNfc ? undefined : "Web NFC requires Android Chrome"}
+              title={canNfc ? undefined : nfcUnavailableReason}
             >
               <Nfc aria-hidden />
               NFC
