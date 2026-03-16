@@ -1,6 +1,21 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "ui": "tui",
+  "globalEnv": [
+    "CONTACT_AVATAR_URL",
+    "CONTACT_BIO",
+    "CONTACT_CONFIG_JSON",
+    "CONTACT_DISPLAY_NAME",
+    "CONTACT_HEADLINE",
+    "CONTACT_ITEMS_JSON",
+    "CONTACT_PAGE_DESCRIPTION",
+    "CONTACT_PAGE_TITLE",
+    "CONTACT_PUBLIC_URL",
+    "CONTACT_PROFILE_JSON",
+    "CONTACT_RENDER_IN_DEV",
+    "CONTACT_VCARD_JSON",
+    "NODE_ENV"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
