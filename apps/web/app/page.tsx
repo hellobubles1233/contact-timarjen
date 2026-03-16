@@ -2,6 +2,7 @@ import { Button } from "@workspace/ui/components/button"
 import {
   ArrowUpRight,
   ChevronRight,
+  Github,
   Shield,
 } from "lucide-react"
 
@@ -37,20 +38,21 @@ export default async function Page() {
         className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(50%_40%_at_50%_0%,color-mix(in_oklch,var(--color-primary)_18%,transparent),transparent_65%)]"
       />
 
-      <div className="mx-auto w-full max-w-md">
-        <div className="mb-4 flex justify-end">
-          <Button asChild variant="ghost" size="sm" className="rounded-full text-xs text-muted-foreground">
-            <a
-              href="https://github.com/hellobubles1233/contact-timarjen"
-              target="_blank"
-              rel="noreferrer noopener"
-            >
-              Steal this page
-              <ArrowUpRight className="size-3.5" aria-hidden />
-            </a>
-          </Button>
-        </div>
+      <div className="absolute top-4 right-4 z-10 sm:top-6 sm:right-6">
+        <Button asChild variant="ghost" size="sm" className="rounded-full text-xs text-muted-foreground">
+          <a
+            href="https://github.com/hellobubles1233/contact-timarjen"
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            <Github className="size-3.5" aria-hidden />
+            Steal this page
+            <ArrowUpRight className="size-3.5" aria-hidden />
+          </a>
+        </Button>
+      </div>
 
+      <div className="mx-auto w-full max-w-md">
         <header className="flex flex-col items-center text-center">
           <div className="relative size-24 overflow-hidden rounded-full border border-border bg-muted shadow-sm">
             {config.profile.avatarUrl ? (
@@ -60,6 +62,7 @@ export default async function Page() {
                 alt={config.profile.displayName}
                 className="size-full object-cover"
                 referrerPolicy="no-referrer"
+                draggable={false}
               />
             ) : (
               <div className="flex size-full items-center justify-center text-xl font-semibold text-muted-foreground">

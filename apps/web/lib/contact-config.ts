@@ -620,7 +620,9 @@ export function getContactConfig(): {
       warnings.push("Set CONTACT_DISPLAY_NAME (or CONTACT_CONFIG_JSON.profile.displayName).")
     }
     if (items.length === 0) {
-      warnings.push("No contact items found. Set CONTACT_ITEMS_JSON (or CONTACT_CONFIG_JSON.items).")
+      warnings.push(
+        "No contact items found. Add flat env keys like EMAIL, PHONE, GITHUB, INSTAGRAM, or DISCORD_USER_ID (or use CONTACT_ITEMS_JSON / CONTACT_CONFIG_JSON.items)."
+      )
     }
   }
 
